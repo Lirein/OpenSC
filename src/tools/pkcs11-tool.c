@@ -50,6 +50,7 @@
 #include <openssl/asn1t.h>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
+#include <openssl/engine.h>
 #if OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECDSA)
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
@@ -179,6 +180,7 @@ static const struct option options[] = {
 	{ "usage-sign",		0, NULL,		OPT_KEY_USAGE_SIGN },
 	{ "usage-decrypt",	0, NULL,		OPT_KEY_USAGE_DECRYPT },
 	{ "usage-derive",	0, NULL,		OPT_KEY_USAGE_DERIVE },
+	{ "engine",		1, NULL,		'E' },
 	{ "write-object",	1, NULL,		'w' },
 	{ "read-object",	0, NULL,		'r' },
 	{ "delete-object",	0, NULL,		'b' },
@@ -244,6 +246,7 @@ static const char *option_help[] = {
 	"Specify 'sign' key usage flag (sets SIGN in privkey, sets VERIFY in pubkey)",
 	"Specify 'decrypt' key usage flag (RSA only, set DECRYPT privkey, ENCRYPT in pubkey)",
 	"Specify 'derive' key usage flag (EC only)",
+	"Set SSL engine provider",
 	"Write an object (key, cert, data) to the card",
 	"Get object's CKA_VALUE attribute (use with --type)",
 	"Delete an object (use with --type cert/data/privkey/pubkey/secrkey)",
@@ -291,6 +294,7 @@ static int		opt_slot_index_set = 0;
 static CK_MECHANISM_TYPE opt_mechanism = 0;
 static int		opt_mechanism_used = 0;
 static const char *	opt_file_to_write = NULL;
+static const char *	opt_engine = NULL;
 static const char *	opt_object_class_str = NULL;
 static CK_OBJECT_CLASS	opt_object_class = -1;
 static CK_BYTE		opt_object_id[100], new_object_id[100];
@@ -529,6 +533,7 @@ int main(int argc, char * argv[])
 #endif
 	int need_session = 0;
 	int opt_login = 0;
+	int do_set_engine = 0;
 	int do_init_token = 0;
 	int do_init_pin = 0;
 	int do_change_pin = 0;
@@ -536,7 +541,7 @@ int main(int argc, char * argv[])
 	int action_count = 0;
 	int do_generate_random = 0;
 	CK_RV rv;
-
+	ENGINE *eng = NULL;
 #ifdef _WIN32
 	char expanded_val[PATH_MAX];
 	DWORD expanded_len;
@@ -547,24 +552,8 @@ int main(int argc, char * argv[])
 		util_fatal("Cannot set FMODE to O_BINARY");
 #endif
 
-#ifdef ENABLE_OPENSSL
-#if (OPENSSL_VERSION_NUMBER >= 0x00907000L && OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
-	OPENSSL_config(NULL);
-#endif
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
-	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
-		| OPENSSL_INIT_ADD_ALL_CIPHERS
-		| OPENSSL_INIT_ADD_ALL_DIGESTS
-		| OPENSSL_INIT_LOAD_CONFIG,
-		NULL);
-#else
-	/* OpenSSL magic */
-	OpenSSL_add_all_algorithms();
-	OPENSSL_malloc_init();
-#endif
-#endif
 	while (1) {
-		c = getopt_long(argc, argv, "ILMOTa:bd:e:hi:klm:o:p:scvf:ty:w:z:r",
+		c = getopt_long(argc, argv, "ILMOTa:bd:e:hi:klm:o:p:scvf:ty:w:z:rE:",
 		                options, &long_optind);
 		if (c == -1)
 			break;
@@ -610,6 +599,12 @@ int main(int argc, char * argv[])
 			need_session |= NEED_SESSION_RW;
 			do_write_object = 1;
 			opt_file_to_write = optarg;
+			action_count++;
+			break;
+		case 'E':
+			need_session |= NEED_SESSION_RW;
+			do_set_engine = 1;
+			opt_engine = optarg;
 			action_count++;
 			break;
 		case 'r':
@@ -841,6 +836,26 @@ int main(int argc, char * argv[])
 			util_print_usage_and_die(app_name, options, option_help, NULL);
 		}
 	}
+#ifdef ENABLE_OPENSSL
+#if (OPENSSL_VERSION_NUMBER >= 0x00907000L && OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_config(NULL);
+#endif
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+		| OPENSSL_INIT_ADD_ALL_CIPHERS
+		| OPENSSL_INIT_ADD_ALL_DIGESTS
+		| OPENSSL_INIT_LOAD_CONFIG,
+		NULL);
+#else
+	/* OpenSSL magic */
+        if(do_set_engine) {
+          eng = ENGINE_by_id(opt_engine);
+          ENGINE_set_default(eng, ENGINE_METHOD_ALL);
+        }
+	OpenSSL_add_all_algorithms();
+	OPENSSL_malloc_init();
+#endif
+#endif
 	if (optind < argc) {
 		util_fatal("invalid option(s) given");
 	}
@@ -2415,6 +2430,8 @@ parse_ec_pkey(EVP_PKEY *pkey, int private, struct gostkey_info *gost)
    public keys (-type pubkey) and data objects (-type data). */
 static int write_object(CK_SESSION_HANDLE session)
 {
+        const CK_BYTE GOST_HASH_PARAMSET_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x1e, 0x01};
+        CK_BYTE hash_paramset_encoded_oid[9];
 	CK_BBOOL _true = TRUE;
 	CK_BBOOL _false = FALSE;
 	unsigned char contents[MAX_OBJECT_SIZE + 1];
@@ -2634,11 +2651,15 @@ static int write_object(CK_SESSION_HANDLE session)
 			n_privkey_attr++;
 		}
 		else if (pk_type == NID_id_GostR3410_2001)   {
-			type = CKK_GOSTR3410;
+printf("Write gost key\n");
+                        memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
 
+			type = CKK_GOSTR3410;
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
 			n_privkey_attr++;
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_GOSTR3410_PARAMS, gost.param_oid.value, gost.param_oid.len);
+			n_privkey_attr++;
+                        FILL_ATTR(privkey_templ[n_privkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid, sizeof(hash_paramset_encoded_oid));
 			n_privkey_attr++;
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_VALUE, gost.private.value, gost.private.len);
 			/* CKA_VALUE of the GOST key has to be in the little endian order */
@@ -2735,6 +2756,7 @@ static int write_object(CK_SESSION_HANDLE session)
 			n_pubkey_attr++;
 		}
 		else if (pk_type == NID_id_GostR3410_2001) {
+printf("Write gost public key");
 			type = CKK_GOSTR3410;
 
 			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
@@ -2824,6 +2846,7 @@ static int write_object(CK_SESSION_HANDLE session)
 	}
 
 	if (n_privkey_attr) {
+                printf("Create object with gost key\n");
 		rv = p11->C_CreateObject(session, privkey_templ, n_privkey_attr, &privkey_obj);
 		if (rv != CKR_OK)
 			p11_fatal("C_CreateObject", rv);
