@@ -2757,11 +2757,14 @@ printf("Write gost key\n");
 		}
 		else if (pk_type == NID_id_GostR3410_2001) {
 printf("Write gost public key");
+                        memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
 			type = CKK_GOSTR3410;
 
 			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
 			n_pubkey_attr++;
 			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_GOSTR3410_PARAMS, gost.param_oid.value, gost.param_oid.len);
+			n_pubkey_attr++;
+                        FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid, sizeof(hash_paramset_encoded_oid));
 			n_pubkey_attr++;
 			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_VALUE, gost.public.value, gost.public.len);
 			/* CKA_VALUE of the GOST key has to be in the little endian order */
